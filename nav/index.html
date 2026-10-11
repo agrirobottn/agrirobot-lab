@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<title>AgriRobot · Dev Lab snapshot</title>
+<style>
+  :root{color-scheme:dark;--bg:#0b0f15;--panel:#111722;--line:#232b39;--fg:#e6edf3;
+        --dim:#8b95a8;--accent:#00e676;--err:#ff5252}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
+            font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  body{display:grid;place-items:center;padding:24px 16px;
+       padding-bottom:calc(24px + env(safe-area-inset-bottom,0px))}
+  .card{width:min(400px,100%);background:var(--panel);border:1px solid var(--line);
+        border-radius:14px;padding:26px 24px 22px}
+  .brand{font:600 11px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.12em;
+         color:var(--accent);text-transform:uppercase}
+  h1{font-size:21px;margin:8px 0 6px;letter-spacing:-.01em}
+  p{margin:0 0 18px;color:var(--dim);font-size:13.5px}
+  label{display:block;font-size:12px;color:var(--dim);margin-bottom:6px}
+  input{width:100%;font:16px/1.3 system-ui,sans-serif;color:var(--fg);background:var(--bg);
+        border:1px solid var(--line);border-radius:9px;padding:12px 13px}
+  input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(0,230,118,.15)}
+  button{width:100%;margin-top:12px;font:600 15px system-ui,sans-serif;color:#04130a;
+         background:var(--accent);border:0;border-radius:9px;padding:12px;cursor:pointer}
+  button:disabled{opacity:.6;cursor:progress}
+  .msg{min-height:20px;margin-top:12px;font-size:13px;color:var(--dim)}
+  .msg.bad{color:var(--err)}
+  .stamp{margin-top:18px;padding-top:14px;border-top:1px solid var(--line);
+         font:11px ui-monospace,monospace;color:#5d6778}
+</style>
+</head>
+<body>
+<form class="card" id="gate" autocomplete="off">
+  <div class="brand">AgriRobot</div>
+  <h1 id="title">Dev Lab</h1>
+  <p id="lede">A frozen snapshot of the development lab: how the robot behaves, how a
+     command travels between its parts, and why. Nothing here drives a robot.</p>
+  <label for="pw">Password</label>
+  <input id="pw" type="password" autocomplete="current-password" autofocus required>
+  <button id="go" type="submit">Open</button>
+  <div class="msg" id="msg"></div>
+  <div class="stamp" id="stamp"></div>
+</form>
+<script>
+/*
+ * The only page in this snapshot that is not encrypted.
+ *
+ * Everything else - both dashboards, the recorded session, the documents -
+ * is one AES-256-GCM blob, keyed by PBKDF2 from the password. Without it the
+ * blob is unreadable, not merely unlinked: hosting it somewhere public exposes
+ * nothing but this form.
+ *
+ * The derived key (not the password) is kept in sessionStorage for this tab,
+ * so moving between the dev lab, the navigation lab and the documents does
+ * not ask again. Closing the tab forgets it.
+ *
+ * All of it is inside one function, on purpose. document.write() replaces the
+ * document but not the global scope, so anything declared at the top level
+ * here is still declared when the dashboard's own scripts run - and the
+ * dashboard declares `$` too. The first version of this page did exactly
+ * that, and the dashboard died on a SyntaxError while looking perfectly fine.
+ */
+(function () {
+"use strict";
+const GATE = {"page": "nav", "target": "nav/index.html", "bundle": "../bundle.bin", "title": "Navigation Lab", "lede": "A frozen snapshot of the navigation lab: the two navigation tracks, how each would drive the robot, and what stands between them and the platform.", "links": {"lab": "../", "nav": "./", "docs": "../docs/"}, "stamp": {"commit": "77b5b42", "date": "2026-10-11"}};
+const MAGIC = "AGR1";
+const AAD = new TextEncoder().encode("AGRI1");
+const $ = id => document.getElementById(id);
+
+$("title").textContent = GATE.title;
+if (GATE.lede) $("lede").textContent = GATE.lede;
+$("stamp").textContent = "frozen at " + GATE.stamp.commit + " · " + GATE.stamp.date;
+
+function say(text, bad) {
+  $("msg").textContent = text;
+  $("msg").className = "msg" + (bad ? " bad" : "");
+}
+const b64 = {
+  enc: u8 => btoa(String.fromCharCode.apply(null, u8)),
+  dec: s => Uint8Array.from(atob(s), c => c.charCodeAt(0)),
+};
+const hex = u8 => Array.from(u8, b => b.toString(16).padStart(2, "0")).join("");
+
+if (!(window.crypto && crypto.subtle)) {
+  say("This page needs HTTPS to decrypt. Open it with https:// in the address.", true);
+  $("go").disabled = true;
+}
+
+let bundle = null;
+async function loadBundle() {
+  if (bundle) return bundle;
+  const r = await fetch(GATE.bundle, {cache: "no-cache"});
+  if (!r.ok) throw new Error("snapshot missing (" + r.status + ")");
+  const buf = new Uint8Array(await r.arrayBuffer());
+  if (new TextDecoder().decode(buf.slice(0, 4)) !== MAGIC) throw new Error("not a snapshot");
+  const iter = new DataView(buf.buffer).getUint32(4);
+  bundle = {iter, salt: buf.slice(8, 24), iv: buf.slice(24, 36), ct: buf.slice(36)};
+  bundle.id = "agrirobot.snapshot." + hex(bundle.salt);
+  return bundle;
+}
+
+async function keyFromPassword(pw, b) {
+  const base = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(pw), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    {name: "PBKDF2", salt: b.salt, iterations: b.iter, hash: "SHA-256"},
+    base, {name: "AES-GCM", length: 256}, true, ["decrypt"]);
+}
+
+async function decrypt(key, b) {
+  const pt = new Uint8Array(await crypto.subtle.decrypt(
+    {name: "AES-GCM", iv: b.iv, additionalData: AAD}, key, b.ct));
+  const n = new DataView(pt.buffer).getUint32(0);
+  const index = JSON.parse(new TextDecoder().decode(pt.slice(4, 4 + n)));
+  const body = pt.subarray(4 + n);
+  const files = {};
+  for (const [path, [off, len, mime]] of Object.entries(index))
+    files[path] = {bytes: body.subarray(off, off + len), mime};
+  return files;
+}
+
+function open(files) {
+  const blobs = {}, text = {};
+  for (const [p, f] of Object.entries(files))
+    blobs[p] = URL.createObjectURL(new Blob([f.bytes], {type: f.mime}));
+  const dec = new TextDecoder();
+  const textOf = p => (text[p] = text[p] || (files[p] ? dec.decode(files[p].bytes) : null));
+  const stamp = JSON.parse(textOf("api/frozen.json") || "{}");
+
+  window.__FROZEN = {
+    page: GATE.page, links: GATE.links, stamp, blobs,
+    json: p => { const t = textOf(p); if (t === null) throw new Error("not in snapshot: " + p);
+                 return JSON.parse(t); },
+  };
+
+  // A local path in the page, resolved the way the lab server would have.
+  const dir = GATE.target.replace(/[^/]*$/, "");
+  const resolve = raw => {
+    if (!raw || /^(?:[a-z]+:|#|\/\/)/i.test(raw)) return null;
+    const name = raw.replace(/^\/+/, "").replace(/[?#].*$/, "");
+    for (const c of [dir + name, "dashboard/" + name, name])
+      if (blobs[c]) return blobs[c];
+    return null;
+  };
+
+  let html = textOf(GATE.target);
+  html = html.replace(/\b(src|href)=("|')([^"']+)\2/g, (m, attr, q, val) => {
+    const b = resolve(val);
+    return b ? `${attr}=${q}${b}${q}` : m;
+  });
+  // The two labs pointed at each other by port; here they are neighbours,
+  // and opened in this tab so the unlocked key comes along.
+  html = html
+    .replace(/href="http:\/\/127\.0\.0\.1:7071\/[^"]*"(\s+target="_blank")?/g, `href="${GATE.links.nav}"`)
+    .replace(/href="http:\/\/127\.0\.0\.1:7070\/[^"]*"(\s+target="_blank")?/g, `href="${GATE.links.lab}"`);
+  html = html.replace(/<head([^>]*)>/i, `<head$1><script src="${blobs["frozen.js"]}"><\/script>`);
+
+  document.open();
+  document.write(html);
+  document.close();
+}
+
+async function unlockWithStoredKey() {
+  let b;
+  try { b = await loadBundle(); } catch (e) { return false; }
+  let raw = null;
+  try { raw = sessionStorage.getItem(b.id); } catch (e) {}
+  if (!raw) return false;
+  try {
+    const key = await crypto.subtle.importKey("raw", b64.dec(raw), "AES-GCM", false, ["decrypt"]);
+    open(await decrypt(key, b));
+    return true;
+  } catch (e) {
+    try { sessionStorage.removeItem(b.id); } catch (_) {}
+    return false;
+  }
+}
+
+$("gate").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  const pw = $("pw").value;
+  if (!pw) return;
+  $("go").disabled = true;
+  say("Unlocking…");
+  try {
+    const b = await loadBundle();
+    const key = await keyFromPassword(pw, b);
+    let files;
+    try { files = await decrypt(key, b); }
+    catch (e) { throw Object.assign(new Error("That password is not right."), {bad: true}); }
+    try {
+      sessionStorage.setItem(b.id, b64.enc(new Uint8Array(await crypto.subtle.exportKey("raw", key))));
+    } catch (e) {}
+    say("Opening…");
+    open(files);
+  } catch (e) {
+    say(e.bad ? e.message : "Could not open the snapshot: " + e.message, true);
+    $("go").disabled = false;
+    $("pw").select();
+  }
+});
+
+if (window.crypto && crypto.subtle) unlockWithStoredKey();
+})();
+</script>
+</body>
+</html>
